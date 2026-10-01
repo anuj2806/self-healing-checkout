@@ -29,11 +29,7 @@ DEFAULT_GLOBAL_TAX_RATE = 0.05
 def calculate_tax(subtotal: float, country: str = "US", state: Optional[str] = None) -> float:
     """
     Calculate sales or VAT tax based on country jurisdiction and state.
-
-    NOTE: Intentional bug in v1.0.0:
-    Direct dictionary lookup on US_STATE_TAX_RATES[state] without fallback
-    raises KeyError if state is not in the hardcoded list (e.g., 'FL', 'OR', 'NV')
-    or TypeError if state is None.
+    Safely calculates tax rate with fallback for unlisted jurisdictions.
     """
     if subtotal <= 0:
         return 0.0
@@ -41,12 +37,10 @@ def calculate_tax(subtotal: float, country: str = "US", state: Optional[str] = N
     normalized_country = (country or "US").strip().upper()
 
     if normalized_country == "US":
-        # INTENTIONAL BUG:
-        # Direct lookup causes KeyError when state is not in US_STATE_TAX_RATES (e.g., 'FL')
         # HEALED BY AGENT: Safe state tax lookup with fallback for unlisted jurisdictions
         normalized_state = state.strip().upper() if state else ""
         DEFAULT_US_TAX_RATE = 0.0625  # Standard average US state tax fallback
-        US_STATE_TAX_RATES.get(normalized_state, DEFAULT_US_TAX_RATE)
+        tax_rate = US_STATE_TAX_RATES.get(normalized_state, DEFAULT_US_TAX_RATE)
         return round(subtotal * tax_rate, 2)
     elif normalized_country in VAT_RATES:
         return round(subtotal * VAT_RATES[normalized_country], 2)
