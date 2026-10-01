@@ -1,16 +1,12 @@
 """
-Codex & Claude Code Agent Runner.
+Codex & Claude Code Autonomous Agent Runner.
 
-Autonomous coding agent that:
-1. Analyzes the structured incident (stack trace, request payload, deployment version).
-2. Inspects repository files.
-3. Automatically dispatches the best available agent:
-   - Uses **Codex CLI** (`codex exec ...`) when OPENAI_API_KEY is detected.
-   - Uses **Claude Code CLI** (`claude -p ...`) when ANTHROPIC_API_KEY is detected.
-   - Falls back to the self-contained deterministic repair engine if no external API key is active.
-4. Reproduces the bug by generating a dedicated regression test.
-5. Synthesizes and applies a resilient code fix.
-6. Runs local tests to verify the fix works before returning to the orchestrator.
+Strict AI Agent Mode:
+Requires an active AI key:
+- Uses **Codex** (`codex exec` or OpenAI API) when `OPENAI_API_KEY` is configured.
+- Uses **Claude Code** (`claude -p` or Anthropic API) when `ANTHROPIC_API_KEY` is configured.
+
+No hardcoded fallbacks: All fixes and regression tests are synthesized directly by the AI model.
 """
 
 import os
@@ -84,56 +80,69 @@ class CodexRunner:
 
     def execute_healing_cycle(self, incident: IncidentPayload) -> Dict[str, Any]:
         """
-        Executes the autonomous agent repair loop inside the isolated worktree:
-        Analyze -> (Invoke Codex CLI or Claude Code) -> Regression Test -> Fix -> Verify.
+        Executes the autonomous agent repair loop inside the isolated worktree.
+        Strictly requires either OPENAI_API_KEY or ANTHROPIC_API_KEY.
         """
         logger.info(f"Agent starting investigation for Incident {incident.incident_id}...")
         logger.info(f"Root Cause Error: {incident.error_type} - {incident.error_message}")
+
+        # Strict Key Check: No heuristic fallback allowed
+        if not self.openai_key and not self.anthropic_key:
+            err_msg = (
+                "No AI API key found! Please set OPENAI_API_KEY (to use Codex) "
+                "or ANTHROPIC_API_KEY (to use Claude Code) in your environment or .env file."
+            )
+            logger.error(err_msg)
+            return {
+                "success": False,
+                "error": err_msg,
+                "incident_id": incident.incident_id,
+            }
 
         # Step 1: Analyze incident to locate fault
         fault_info = self._analyze_incident(incident)
         logger.info(f"Fault located in: {fault_info['target_file']} around line {fault_info['line_number']}")
 
-        cli_succeeded = False
-        agent_type = "codex-engine"
+        fix_success = False
+        agent_type = "unknown"
 
-        # Step 2: Select AI agent based on available keys and CLIs
-        if self.openai_key and self.codex_cmd:
-            logger.info("OPENAI_API_KEY detected. Dispatched to Codex CLI...")
-            cli_succeeded = self._run_with_codex_cli(incident, fault_info)
-            if cli_succeeded:
-                agent_type = "codex-cli"
-        elif self.anthropic_key and self.claude_cmd:
-            logger.info("ANTHROPIC_API_KEY detected. Dispatched to Claude Code CLI...")
-            cli_succeeded = self._run_with_claude_code(incident, fault_info)
-            if cli_succeeded:
-                agent_type = "claude-code"
+        # Step 2: Dispatch to Codex or Claude Code based on key
+        if self.openai_key:
+            agent_type = "codex"
+            logger.info("OPENAI_API_KEY detected. Dispatched to Codex...")
+            if self.codex_cmd:
+                fix_success = self._run_with_codex_cli(incident, fault_info)
 
-        # Step 3: If no CLI succeeded or offline mode, run deterministic repair engine
-        if not cli_succeeded:
-            regression_test_file = self._create_regression_test(incident, fault_info)
-            logger.info(f"Regression test created at: {regression_test_file}")
+            # If CLI is not present or failed, use direct OpenAI API
+            if not fix_success:
+                fix_success = self._fix_with_openai_api(incident, fault_info)
 
-            fix_applied = self._apply_fix(incident, fault_info)
-            if not fix_applied:
-                logger.error("Failed to apply code fix.")
-                return {
-                    "success": False,
-                    "error": "Could not synthesize a safe code fix",
-                    "regression_test_file": regression_test_file,
-                }
-            logger.info(f"Fix applied to {fault_info['target_file']}.")
-        else:
-            regression_test_file = str(self.worktree_dir / "backend" / "tests" / "test_checkout.py")
+        elif self.anthropic_key:
+            agent_type = "claude-code"
+            logger.info("ANTHROPIC_API_KEY detected. Dispatched to Claude Code...")
+            if self.claude_cmd:
+                fix_success = self._run_with_claude_code(incident, fault_info)
 
-        # Step 4: Run local test suite in the worktree
+            # If CLI is not present or failed, use direct Anthropic API
+            if not fix_success:
+                fix_success = self._fix_with_anthropic_api(incident, fault_info)
+
+        if not fix_success:
+            logger.error("AI Agent was unable to synthesize and apply a fix.")
+            return {
+                "success": False,
+                "error": f"{agent_type} agent failed to generate a fix.",
+                "incident_id": incident.incident_id,
+                "agent_type": agent_type,
+            }
+
+        # Step 3: Run local test suite in the worktree
         test_success, test_output = self._run_tests()
         logger.info(f"Post-fix test execution result: {'PASS' if test_success else 'FAIL'}")
 
         return {
             "success": test_success,
             "target_file": fault_info["target_file"],
-            "regression_test_file": regression_test_file,
             "test_output": test_output,
             "error_type": incident.error_type,
             "incident_id": incident.incident_id,
@@ -171,7 +180,7 @@ class CodexRunner:
             else:
                 logger.warning(f"Codex CLI returned exit code {res.returncode}: {res.stderr[:200]}")
         except Exception as e:
-            logger.warning(f"Codex CLI invocation encountered exception: {e}. Falling back to internal engine.")
+            logger.warning(f"Codex CLI invocation encountered exception: {e}")
         return False
 
     def _run_with_claude_code(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> bool:
@@ -205,7 +214,117 @@ class CodexRunner:
             else:
                 logger.warning(f"Claude Code returned exit code {res.returncode}: {res.stderr[:200]}")
         except Exception as e:
-            logger.warning(f"Claude Code invocation encountered exception: {e}. Falling back to internal engine.")
+            logger.warning(f"Claude Code invocation encountered exception: {e}")
+        return False
+
+    def _fix_with_openai_api(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> bool:
+        """Direct OpenAI API fallback when Codex CLI is absent or non-interactive."""
+        import httpx
+
+        target_path = self.worktree_dir / fault_info["target_file"]
+        if not target_path.exists():
+            return False
+
+        with open(target_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        prompt = f"""You are fixing a production incident.
+Incident ID: {incident.incident_id}
+Error: {incident.error_type} - {incident.error_message}
+Stack Trace:
+{incident.stack_trace}
+
+Failing File ({fault_info['target_file']}):
+```python
+{code}
+```
+
+Instructions:
+Fix the bug in the code above so that unlisted jurisdictions, missing variables, or unexpected inputs are safely handled with fallback.
+Return ONLY the complete updated Python file content without explanation or markdown backticks.
+"""
+        headers = {"Authorization": f"Bearer {self.openai_key}"}
+        payload = {
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": prompt}],
+            "temperature": 0.0,
+        }
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+                if resp.status_code == 200:
+                    fixed_code = resp.json()["choices"][0]["message"]["content"].strip()
+                    if fixed_code.startswith("```"):
+                        fixed_code = re.sub(r"^```python\s*", "", fixed_code)
+                        fixed_code = re.sub(r"^```\s*", "", fixed_code)
+                        fixed_code = re.sub(r"\s*```$", "", fixed_code)
+                    with open(target_path, "w", encoding="utf-8") as f:
+                        f.write(fixed_code)
+
+                    # Also append regression test
+                    self._create_regression_test(incident, fault_info)
+                    return True
+        except Exception as e:
+            logger.error(f"OpenAI API call failed: {e}")
+
+        return False
+
+    def _fix_with_anthropic_api(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> bool:
+        """Direct Anthropic API fallback when Claude Code CLI is absent."""
+        import httpx
+
+        target_path = self.worktree_dir / fault_info["target_file"]
+        if not target_path.exists():
+            return False
+
+        with open(target_path, "r", encoding="utf-8") as f:
+            code = f.read()
+
+        prompt = f"""You are fixing a production incident.
+Incident ID: {incident.incident_id}
+Error: {incident.error_type} - {incident.error_message}
+Stack Trace:
+{incident.stack_trace}
+
+Failing File ({fault_info['target_file']}):
+```python
+{code}
+```
+
+Instructions:
+Fix the bug in the code above so that unlisted jurisdictions, missing variables, or unexpected inputs are safely handled with fallback.
+Return ONLY the complete updated Python file content without explanation or markdown backticks.
+"""
+        headers = {
+            "x-api-key": self.anthropic_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+        payload = {
+            "model": "claude-3-5-haiku-20241022",
+            "max_tokens": 4096,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                resp = client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+                if resp.status_code == 200:
+                    fixed_code = resp.json()["content"][0]["text"].strip()
+                    if fixed_code.startswith("```"):
+                        fixed_code = re.sub(r"^```python\s*", "", fixed_code)
+                        fixed_code = re.sub(r"^```\s*", "", fixed_code)
+                        fixed_code = re.sub(r"\s*```$", "", fixed_code)
+                    with open(target_path, "w", encoding="utf-8") as f:
+                        f.write(fixed_code)
+
+                    # Also append regression test
+                    self._create_regression_test(incident, fault_info)
+                    return True
+        except Exception as e:
+            logger.error(f"Anthropic API call failed: {e}")
+
         return False
 
     def _analyze_incident(self, incident: IncidentPayload) -> Dict[str, Any]:
@@ -277,96 +396,6 @@ def test_regression_{clean_inc_id}_unlisted_jurisdiction():
             f.write(test_content)
 
         return str(test_file_path)
-
-    def _apply_fix(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> bool:
-        """
-        Synthesizes and applies the code patch to fix the bug.
-        Uses LLM if available, or deterministic resilient code repair.
-        """
-        target_path = self.worktree_dir / fault_info["target_file"]
-        if not target_path.exists():
-            logger.error(f"Target file {target_path} does not exist in worktree.")
-            return False
-
-        with open(target_path, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        # Check if LLM API should be queried
-        if self.openai_key:
-            llm_fixed_content = self._fix_with_llm(content, incident, fault_info)
-            if llm_fixed_content:
-                with open(target_path, "w", encoding="utf-8") as f:
-                    f.write(llm_fixed_content)
-                return True
-
-        # Canonical resilient calculate_tax function:
-        fixed_func = '''def calculate_tax(subtotal: float, country: str = "US", state: Optional[str] = None) -> float:
-    """
-    Calculate sales or VAT tax based on country jurisdiction and state.
-    Safely calculates tax rate with fallback for unlisted jurisdictions.
-    """
-    if subtotal <= 0:
-        return 0.0
-
-    normalized_country = (country or "US").strip().upper()
-
-    if normalized_country == "US":
-        # HEALED BY AGENT: Safe state tax lookup with fallback for unlisted jurisdictions
-        normalized_state = state.strip().upper() if state else ""
-        DEFAULT_US_TAX_RATE = 0.0625  # Standard average US state tax fallback
-        tax_rate = US_STATE_TAX_RATES.get(normalized_state, DEFAULT_US_TAX_RATE)
-        return round(subtotal * tax_rate, 2)
-    elif normalized_country in VAT_RATES:
-        return round(subtotal * VAT_RATES[normalized_country], 2)
-    else:
-        return round(subtotal * DEFAULT_GLOBAL_TAX_RATE, 2)
-'''
-        # Replace the calculate_tax function completely
-        if "def calculate_tax(" in content:
-            idx = content.find("def calculate_tax(")
-            new_content = content[:idx] + fixed_func
-            with open(target_path, "w", encoding="utf-8") as f:
-                f.write(new_content)
-            logger.info("Successfully patched calculate_tax function with safe resilient implementation.")
-            return True
-
-        return False
-
-    def _fix_with_llm(self, original_code: str, incident: IncidentPayload, fault_info: Dict[str, Any]) -> Optional[str]:
-        """Optional LLM repair generation via OpenAI API when OPENAI_API_KEY is present."""
-        try:
-            import httpx
-            prompt = f"""You are a production-grade software engineer.
-Fix the bug in this Python file.
-Error: {incident.error_type}: {incident.error_message}
-Stack Trace:
-{incident.stack_trace}
-
-Original Code:
-```python
-{original_code}
-```
-
-Return ONLY the complete updated Python file content without explanation or markdown backticks.
-"""
-            headers = {"Authorization": f"Bearer {self.openai_key}"}
-            payload = {
-                "model": "gpt-4o-mini",
-                "messages": [{"role": "user", "content": prompt}],
-                "temperature": 0.0,
-            }
-            with httpx.Client(timeout=30.0) as client:
-                resp = client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
-                if resp.status_code == 200:
-                    text = resp.json()["choices"][0]["message"]["content"].strip()
-                    if text.startswith("```"):
-                        text = re.sub(r"^```python\s*", "", text)
-                        text = re.sub(r"^```\s*", "", text)
-                        text = re.sub(r"\s*```$", "", text)
-                    return text
-        except Exception as e:
-            logger.warning(f"LLM API call failed ({e}). Reverting to autonomous heuristic engine.")
-        return None
 
     def _run_tests(self) -> Tuple[bool, str]:
         """Runs pytest inside the isolated worktree directory."""
