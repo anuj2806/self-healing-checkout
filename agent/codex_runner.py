@@ -4,13 +4,13 @@ Codex & Claude Code Agent Runner.
 Autonomous coding agent that:
 1. Analyzes the structured incident (stack trace, request payload, deployment version).
 2. Inspects repository files.
-3. Invokes Claude Code CLI (`claude -p ...`) or OpenAI API if configured.
+3. Automatically dispatches the best available agent:
+   - Uses **Codex CLI** (`codex exec ...`) when OPENAI_API_KEY is detected.
+   - Uses **Claude Code CLI** (`claude -p ...`) when ANTHROPIC_API_KEY is detected.
+   - Falls back to the self-contained deterministic repair engine if no external API key is active.
 4. Reproduces the bug by generating a dedicated regression test.
 5. Synthesizes and applies a resilient code fix.
 6. Runs local tests to verify the fix works before returning to the orchestrator.
-
-Supports Claude Code CLI natively, with a built-in deterministic autonomous
-reasoning engine that operates reliably in local/demo/CI environments.
 """
 
 import os
@@ -36,24 +36,47 @@ class CodexRunner:
         self.openai_key = os.getenv("OPENAI_API_KEY")
         self.anthropic_key = os.getenv("ANTHROPIC_API_KEY")
         self.claude_cmd = self._find_claude_cli()
+        self.codex_cmd = self._find_codex_cli()
 
     def _find_claude_cli(self) -> Optional[str]:
         """Locates the claude CLI binary across system and npm paths portably."""
-        # 1. Check system PATH
         for name in ["claude", "claude.cmd"]:
             path = shutil.which(name)
             if path:
                 return path
 
-        # 2. Check Windows dynamic APPDATA npm directory
         appdata = os.getenv("APPDATA")
         if appdata:
             npm_claude = Path(appdata) / "npm" / "claude.cmd"
             if npm_claude.exists():
                 return str(npm_claude)
 
-        # 3. Check standard Linux/Docker binary paths
         for linux_path in ["/usr/local/bin/claude", "/usr/bin/claude"]:
+            if os.path.exists(linux_path):
+                return linux_path
+
+        return None
+
+    def _find_codex_cli(self) -> Optional[str]:
+        """Locates the codex CLI binary across system and npm paths portably."""
+        for name in ["codex", "codex.exe", "codex.cmd"]:
+            path = shutil.which(name)
+            if path:
+                return path
+
+        appdata = os.getenv("APPDATA")
+        if appdata:
+            npm_codex = Path(appdata) / "npm" / "codex.cmd"
+            if npm_codex.exists():
+                return str(npm_codex)
+
+        localappdata = os.getenv("LOCALAPPDATA")
+        if localappdata:
+            local_codex = Path(localappdata) / "Programs" / "Codex" / "codex.exe"
+            if local_codex.exists():
+                return str(local_codex)
+
+        for linux_path in ["/usr/local/bin/codex", "/usr/bin/codex"]:
             if os.path.exists(linux_path):
                 return linux_path
 
@@ -62,7 +85,7 @@ class CodexRunner:
     def execute_healing_cycle(self, incident: IncidentPayload) -> Dict[str, Any]:
         """
         Executes the autonomous agent repair loop inside the isolated worktree:
-        Analyze -> (Invoke Claude Code if available) -> Add Regression Test -> Implement Fix -> Verify.
+        Analyze -> (Invoke Codex CLI or Claude Code) -> Regression Test -> Fix -> Verify.
         """
         logger.info(f"Agent starting investigation for Incident {incident.incident_id}...")
         logger.info(f"Root Cause Error: {incident.error_type} - {incident.error_message}")
@@ -71,13 +94,23 @@ class CodexRunner:
         fault_info = self._analyze_incident(incident)
         logger.info(f"Fault located in: {fault_info['target_file']} around line {fault_info['line_number']}")
 
-        # Step 2: Try Claude Code CLI if installed & enabled/authenticated
-        claude_succeeded = False
-        if self.claude_cmd and (self.anthropic_key or os.getenv("USE_CLAUDE_CODE", "1") == "1"):
-            claude_succeeded = self._run_with_claude_code(incident, fault_info)
+        cli_succeeded = False
+        agent_type = "codex-engine"
 
-        if not claude_succeeded:
-            # Step 2b: Autonomous engine creates regression test & applies fix
+        # Step 2: Select AI agent based on available keys and CLIs
+        if self.openai_key and self.codex_cmd:
+            logger.info("OPENAI_API_KEY detected. Dispatched to Codex CLI...")
+            cli_succeeded = self._run_with_codex_cli(incident, fault_info)
+            if cli_succeeded:
+                agent_type = "codex-cli"
+        elif self.anthropic_key and self.claude_cmd:
+            logger.info("ANTHROPIC_API_KEY detected. Dispatched to Claude Code CLI...")
+            cli_succeeded = self._run_with_claude_code(incident, fault_info)
+            if cli_succeeded:
+                agent_type = "claude-code"
+
+        # Step 3: If no CLI succeeded or offline mode, run deterministic repair engine
+        if not cli_succeeded:
             regression_test_file = self._create_regression_test(incident, fault_info)
             logger.info(f"Regression test created at: {regression_test_file}")
 
@@ -93,7 +126,7 @@ class CodexRunner:
         else:
             regression_test_file = str(self.worktree_dir / "backend" / "tests" / "test_checkout.py")
 
-        # Step 3: Run local test suite in the worktree
+        # Step 4: Run local test suite in the worktree
         test_success, test_output = self._run_tests()
         logger.info(f"Post-fix test execution result: {'PASS' if test_success else 'FAIL'}")
 
@@ -104,8 +137,42 @@ class CodexRunner:
             "test_output": test_output,
             "error_type": incident.error_type,
             "incident_id": incident.incident_id,
-            "agent_type": "claude-code" if claude_succeeded else "codex-engine",
+            "agent_type": agent_type,
         }
+
+    def _run_with_codex_cli(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> bool:
+        """Invokes Codex CLI non-interactively inside the isolated worktree."""
+        prompt = (
+            f"Fix production incident {incident.incident_id}:\n"
+            f"Error: {incident.error_type} - {incident.error_message}\n"
+            f"Failing File: {fault_info['target_file']}\n"
+            f"Stack Trace:\n{incident.stack_trace}\n\n"
+            f"Request Payload:\n{json.dumps(incident.request_payload, indent=2)}\n\n"
+            "Required Actions:\n"
+            "1. In backend/tests/test_checkout.py, add a regression test for this incident.\n"
+            "2. In backend/app/tax.py, fix the tax calculation so unlisted states and missing variables are safely handled.\n"
+            "3. Run pytest backend/tests and ensure all tests pass."
+        )
+
+        try:
+            logger.info(f"Dispatching Codex CLI ({self.codex_cmd}) in worktree...")
+            cmd = [self.codex_cmd, "exec", prompt, "--dangerously-bypass-approvals-and-sandbox"]
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.worktree_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=os.environ.copy(),
+            )
+            if res.returncode == 0:
+                logger.info("Codex CLI successfully executed inside worktree.")
+                return True
+            else:
+                logger.warning(f"Codex CLI returned exit code {res.returncode}: {res.stderr[:200]}")
+        except Exception as e:
+            logger.warning(f"Codex CLI invocation encountered exception: {e}. Falling back to internal engine.")
+        return False
 
     def _run_with_claude_code(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> bool:
         """Invokes Claude Code CLI inside the isolated worktree in headless mode."""
