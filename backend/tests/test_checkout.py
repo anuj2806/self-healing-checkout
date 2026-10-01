@@ -1,0 +1,99 @@
+from fastapi.testclient import TestClient
+from app.main import app
+
+client = TestClient(app)
+
+
+def test_health_check():
+    """Verify health endpoint responds with healthy status."""
+    response = client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert "version" in data
+
+
+def test_successful_checkout_california():
+    """Verify checkout in California with valid state tax."""
+    payload = {
+        "cart_items": [
+            {"id": "item-1", "name": "Mechanical Keyboard", "price": 100.0, "quantity": 1}
+        ],
+        "shipping_address": {
+            "street": "123 Market St",
+            "city": "San Francisco",
+            "state": "CA",
+            "postal_code": "94103",
+            "country": "US",
+        },
+    }
+    response = client.post("/api/checkout", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "COMPLETED"
+    assert data["subtotal"] == 100.0
+    # CA rate is 0.0825 -> 8.25
+    assert data["tax"] == 8.25
+    assert data["total"] == 108.25
+    assert "ord-" in data["order_id"]
+
+
+def test_successful_checkout_new_york():
+    """Verify checkout in New York."""
+    payload = {
+        "cart_items": [
+            {"id": "item-2", "name": "Wireless Mouse", "price": 50.0, "quantity": 2}
+        ],
+        "shipping_address": {
+            "street": "456 5th Ave",
+            "city": "New York",
+            "state": "NY",
+            "postal_code": "10001",
+            "country": "US",
+        },
+    }
+    response = client.post("/api/checkout", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "COMPLETED"
+    assert data["subtotal"] == 100.0
+    # NY rate is 0.0850 -> 8.50
+    assert data["tax"] == 8.50
+    assert data["total"] == 108.50
+
+
+def test_empty_cart_validation():
+    """Verify empty cart yields 400 Bad Request."""
+    payload = {
+        "cart_items": [],
+        "shipping_address": {
+            "street": "123 Main St",
+            "city": "Austin",
+            "state": "TX",
+            "postal_code": "78701",
+            "country": "US",
+        },
+    }
+    response = client.post("/api/checkout", json=payload)
+    assert response.status_code == 400
+
+
+def test_international_checkout_uk():
+    """Verify international VAT rate calculation (20%)."""
+    payload = {
+        "cart_items": [
+            {"id": "item-3", "name": "USB-C Hub", "price": 40.0, "quantity": 1}
+        ],
+        "shipping_address": {
+            "street": "10 Downing St",
+            "city": "London",
+            "state": None,
+            "postal_code": "SW1A 2AA",
+            "country": "GB",
+        },
+    }
+    response = client.post("/api/checkout", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["tax"] == 8.00  # 20% of 40
+    assert data["total"] == 48.00
