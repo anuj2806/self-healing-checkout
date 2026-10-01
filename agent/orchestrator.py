@@ -113,6 +113,13 @@ class Orchestrator:
                 self._notify_incident_status(incident_id, "FAILED")
                 return {"success": False, "error": f"Worktree creation failed: {add_res.stderr}"}
 
+        # Synchronize live app files from repo_root to worktree so any uncommitted demo edits are captured
+        for live_file in (self.repo_root / "backend" / "app").glob("**/*.py"):
+            rel = live_file.relative_to(self.repo_root)
+            dest = worktree_path / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(live_file, dest)
+
         try:
             self._notify_incident_status(incident_id, "FIXING")
 

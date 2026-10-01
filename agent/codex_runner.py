@@ -85,7 +85,6 @@ class CodexRunner:
         matches = re.findall(r'File "([^"]+)", line (\d+), in (\w+)', tb)
         for filepath, line, func in matches:
             if "tax.py" in filepath or "checkout.py" in filepath:
-                # Normalize relative path
                 if "tax.py" in filepath:
                     target_file = "backend/app/tax.py"
                 elif "checkout.py" in filepath:
@@ -140,7 +139,7 @@ def test_regression_{clean_inc_id}_unlisted_jurisdiction():
     data = response.json()
     assert data["status"] == "COMPLETED"
     assert data["subtotal"] == 100.0
-    # Tax should be computed without throwing KeyError
+    # Tax should be computed without throwing KeyError or NameError
     assert data["tax"] >= 0.0
     assert data["total"] == round(data["subtotal"] + data["tax"], 2)
 '''
@@ -172,35 +171,36 @@ def test_regression_{clean_inc_id}_unlisted_jurisdiction():
                     f.write(llm_fixed_content)
                 return True
 
-        # Deterministic / Heuristic Autonomous Patch
-        # In backend/app/tax.py:
-        # Replace:
-        #     tax_rate = US_STATE_TAX_RATES[state]
-        # with safe lookup supporting fallback and state normalization.
-        buggy_pattern = r"tax_rate = US_STATE_TAX_RATES\[state\]"
-        safe_replacement = """# HEALED BY AGENT: Safe state tax lookup with fallback for unlisted jurisdictions
+        # Canonical resilient calculate_tax function:
+        fixed_func = '''def calculate_tax(subtotal: float, country: str = "US", state: Optional[str] = None) -> float:
+    """
+    Calculate sales or VAT tax based on country jurisdiction and state.
+    Safely calculates tax rate with fallback for unlisted jurisdictions.
+    """
+    if subtotal <= 0:
+        return 0.0
+
+    normalized_country = (country or "US").strip().upper()
+
+    if normalized_country == "US":
+        # HEALED BY AGENT: Safe state tax lookup with fallback for unlisted jurisdictions
         normalized_state = state.strip().upper() if state else ""
         DEFAULT_US_TAX_RATE = 0.0625  # Standard average US state tax fallback
-        tax_rate = US_STATE_TAX_RATES.get(normalized_state, DEFAULT_US_TAX_RATE)"""
-
-        if re.search(buggy_pattern, content):
-            new_content = re.sub(buggy_pattern, safe_replacement, content)
+        tax_rate = US_STATE_TAX_RATES.get(normalized_state, DEFAULT_US_TAX_RATE)
+        return round(subtotal * tax_rate, 2)
+    elif normalized_country in VAT_RATES:
+        return round(subtotal * VAT_RATES[normalized_country], 2)
+    else:
+        return round(subtotal * DEFAULT_GLOBAL_TAX_RATE, 2)
+'''
+        # Replace the calculate_tax function completely
+        if "def calculate_tax(" in content:
+            idx = content.find("def calculate_tax(")
+            new_content = content[:idx] + fixed_func
             with open(target_path, "w", encoding="utf-8") as f:
                 f.write(new_content)
+            logger.info("Successfully patched calculate_tax function with safe resilient implementation.")
             return True
-        elif "US_STATE_TAX_RATES.get" in content:
-            logger.info("File appears already patched.")
-            return True
-        else:
-            # Fallback replacement if exact line differs slightly
-            if "US_STATE_TAX_RATES" in content:
-                content = content.replace(
-                    "tax_rate = US_STATE_TAX_RATES[state]",
-                    safe_replacement
-                )
-                with open(target_path, "w", encoding="utf-8") as f:
-                    f.write(content)
-                return True
 
         return False
 
@@ -242,7 +242,6 @@ Return ONLY the complete updated Python file content without explanation or mark
 
     def _run_tests(self) -> Tuple[bool, str]:
         """Runs pytest inside the isolated worktree directory."""
-        # Detect python executable (either virtualenv or system python)
         python_exe = sys.executable
         venv_python = Path(sys.prefix) / "Scripts" / "python.exe"
         if venv_python.exists():
