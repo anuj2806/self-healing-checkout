@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PYTHONPATH=/app/backend:/app
 
-# Install git, curl, and Node.js for Claude Code CLI
+# Install git, curl, Node.js, and globally install both Codex CLI and Claude Code CLI
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnupg \
     && curl -fsSL https://deb.nodesource.com/setup_20.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
-    && npm install -g @anthropic-ai/claude-code \
+    && npm install -g @openai/codex @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/*
 
 # Configure git for bot
