@@ -1,15 +1,16 @@
 """
-Codex Agent Runner.
+Codex & Claude Code Agent Runner.
 
 Autonomous coding agent that:
 1. Analyzes the structured incident (stack trace, request payload, deployment version).
 2. Inspects repository files.
-3. Reproduces the bug by generating a dedicated regression test.
-4. Synthesizes and applies a code fix.
-5. Runs local tests to verify the fix works before returning to the orchestrator.
+3. Invokes Claude Code CLI (`claude -p ...`) or OpenAI API if configured.
+4. Reproduces the bug by generating a dedicated regression test.
+5. Synthesizes and applies a resilient code fix.
+6. Runs local tests to verify the fix works before returning to the orchestrator.
 
-Supports LLM APIs (OpenAI, Gemini, Anthropic) if configured, with a built-in
-deterministic autonomous reasoning engine that operates reliably in local/demo/CI environments.
+Supports Claude Code CLI natively, with a built-in deterministic autonomous
+reasoning engine that operates reliably in local/demo/CI environments.
 """
 
 import os
@@ -17,6 +18,7 @@ import sys
 import json
 import logging
 import subprocess
+import shutil
 import re
 from typing import Dict, Any, Optional, Tuple
 from pathlib import Path
@@ -32,12 +34,29 @@ class CodexRunner:
     def __init__(self, worktree_dir: str):
         self.worktree_dir = Path(worktree_dir).resolve()
         self.openai_key = os.getenv("OPENAI_API_KEY")
-        self.gemini_key = os.getenv("GEMINI_API_KEY")
+        self.anthropic_key = os.getenv("ANTHROPIC_API_KEY")
+        self.claude_cmd = self._find_claude_cli()
+
+    def _find_claude_cli(self) -> Optional[str]:
+        """Locates the claude CLI binary across system and npm paths."""
+        candidates = [
+            "claude",
+            "claude.cmd",
+            r"C:\Users\anujsingh\AppData\Roaming\npm\claude.cmd",
+            "/usr/local/bin/claude",
+        ]
+        for c in candidates:
+            path = shutil.which(c)
+            if path:
+                return path
+            if os.path.exists(c):
+                return c
+        return None
 
     def execute_healing_cycle(self, incident: IncidentPayload) -> Dict[str, Any]:
         """
         Executes the autonomous agent repair loop inside the isolated worktree:
-        Analyze -> Reproduce -> Add Regression Test -> Implement Fix -> Verify.
+        Analyze -> (Invoke Claude Code if available) -> Add Regression Test -> Implement Fix -> Verify.
         """
         logger.info(f"Agent starting investigation for Incident {incident.incident_id}...")
         logger.info(f"Root Cause Error: {incident.error_type} - {incident.error_message}")
@@ -46,23 +65,29 @@ class CodexRunner:
         fault_info = self._analyze_incident(incident)
         logger.info(f"Fault located in: {fault_info['target_file']} around line {fault_info['line_number']}")
 
-        # Step 2: Generate Regression Test
-        regression_test_file = self._create_regression_test(incident, fault_info)
-        logger.info(f"Regression test created at: {regression_test_file}")
+        # Step 2: Try Claude Code CLI if installed & enabled/authenticated
+        claude_succeeded = False
+        if self.claude_cmd and (self.anthropic_key or os.getenv("USE_CLAUDE_CODE", "1") == "1"):
+            claude_succeeded = self._run_with_claude_code(incident, fault_info)
 
-        # Step 3: Implement Code Fix
-        fix_applied = self._apply_fix(incident, fault_info)
-        if not fix_applied:
-            logger.error("Failed to apply code fix.")
-            return {
-                "success": False,
-                "error": "Could not synthesize a safe code fix",
-                "regression_test_file": regression_test_file,
-            }
+        if not claude_succeeded:
+            # Step 2b: Autonomous engine creates regression test & applies fix
+            regression_test_file = self._create_regression_test(incident, fault_info)
+            logger.info(f"Regression test created at: {regression_test_file}")
 
-        logger.info(f"Fix applied to {fault_info['target_file']}.")
+            fix_applied = self._apply_fix(incident, fault_info)
+            if not fix_applied:
+                logger.error("Failed to apply code fix.")
+                return {
+                    "success": False,
+                    "error": "Could not synthesize a safe code fix",
+                    "regression_test_file": regression_test_file,
+                }
+            logger.info(f"Fix applied to {fault_info['target_file']}.")
+        else:
+            regression_test_file = str(self.worktree_dir / "backend" / "tests" / "test_checkout.py")
 
-        # Step 4: Run local test suite in the worktree
+        # Step 3: Run local test suite in the worktree
         test_success, test_output = self._run_tests()
         logger.info(f"Post-fix test execution result: {'PASS' if test_success else 'FAIL'}")
 
@@ -73,14 +98,48 @@ class CodexRunner:
             "test_output": test_output,
             "error_type": incident.error_type,
             "incident_id": incident.incident_id,
+            "agent_type": "claude-code" if claude_succeeded else "codex-engine",
         }
+
+    def _run_with_claude_code(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> bool:
+        """Invokes Claude Code CLI inside the isolated worktree in headless mode."""
+        prompt = (
+            f"Fix production incident {incident.incident_id}:\n"
+            f"Error: {incident.error_type} - {incident.error_message}\n"
+            f"Failing File: {fault_info['target_file']}\n"
+            f"Stack Trace:\n{incident.stack_trace}\n\n"
+            f"Request Payload:\n{json.dumps(incident.request_payload, indent=2)}\n\n"
+            "Required Actions:\n"
+            "1. In backend/tests/test_checkout.py, add a regression test for this incident.\n"
+            "2. In backend/app/tax.py, fix the tax calculation so unlisted states/NameErrors are safely handled.\n"
+            "3. Run pytest backend/tests and verify all tests pass."
+        )
+
+        try:
+            logger.info(f"Dispatching Claude Code CLI ({self.claude_cmd}) in worktree...")
+            cmd = [self.claude_cmd, "-p", prompt, "--dangerously-skip-permissions"]
+            res = subprocess.run(
+                cmd,
+                cwd=str(self.worktree_dir),
+                capture_output=True,
+                text=True,
+                timeout=120,
+                env=os.environ.copy(),
+            )
+            if res.returncode == 0:
+                logger.info("Claude Code successfully executed inside worktree.")
+                return True
+            else:
+                logger.warning(f"Claude Code returned exit code {res.returncode}: {res.stderr[:200]}")
+        except Exception as e:
+            logger.warning(f"Claude Code invocation encountered exception: {e}. Falling back to internal engine.")
+        return False
 
     def _analyze_incident(self, incident: IncidentPayload) -> Dict[str, Any]:
         """Parses the stack trace and request payload to identify failing file and parameters."""
         target_file = "backend/app/tax.py"
         line_number = 36
 
-        # Parse stack trace for exact file and line if available
         tb = incident.stack_trace
         matches = re.findall(r'File "([^"]+)", line (\d+), in (\w+)', tb)
         for filepath, line, func in matches:
@@ -91,7 +150,6 @@ class CodexRunner:
                     target_file = "backend/app/checkout.py"
                 line_number = int(line)
 
-        # Extract failed state/country from request
         shipping = incident.request_payload.get("shipping_address", {})
         failed_state = shipping.get("state", "FL")
         failed_country = shipping.get("country", "US")
@@ -105,10 +163,7 @@ class CodexRunner:
         }
 
     def _create_regression_test(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> str:
-        """
-        Creates a dedicated regression test reproducing the exact failure scenario
-        found in the incident.
-        """
+        """Creates a dedicated regression test reproducing the exact failure scenario."""
         failed_state = fault_info["failed_state"]
         failed_country = fault_info["failed_country"]
         clean_inc_id = incident.incident_id.replace("-", "_")
@@ -163,7 +218,7 @@ def test_regression_{clean_inc_id}_unlisted_jurisdiction():
         with open(target_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # Check if LLM should be queried
+        # Check if LLM API should be queried
         if self.openai_key:
             llm_fixed_content = self._fix_with_llm(content, incident, fault_info)
             if llm_fixed_content:
