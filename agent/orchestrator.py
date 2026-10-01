@@ -44,20 +44,30 @@ class Orchestrator:
         self.backend_url = os.getenv("BACKEND_URL", "http://127.0.0.1:8000")
 
     def _find_git_executable(self) -> str:
-        """Locates git executable across standard system and user locations."""
-        candidates = [
-            "git",
-            r"C:\Users\anujsingh\AppData\Local\Programs\Git\cmd\git.exe",
-            r"C:\Program Files\Git\cmd\git.exe",
-            r"C:\Program Files (x86)\Git\cmd\git.exe",
-        ]
+        """Locates git executable portably across system, user, and container paths."""
+        # 1. Check system PATH
+        path = shutil.which("git")
+        if path:
+            return path
+
+        # 2. Check Windows user and program files dynamically
+        candidates = []
+        localappdata = os.getenv("LOCALAPPDATA")
+        if localappdata:
+            candidates.append(str(Path(localappdata) / "Programs" / "Git" / "cmd" / "git.exe"))
+
+        for pf_var in ["ProgramFiles", "ProgramFiles(x86)"]:
+            pf = os.getenv(pf_var)
+            if pf:
+                candidates.append(str(Path(pf) / "Git" / "cmd" / "git.exe"))
+
+        # 3. Check Linux/Docker standard paths
+        candidates.extend(["/usr/bin/git", "/usr/local/bin/git"])
+
         for c in candidates:
-            try:
-                res = subprocess.run([c, "--version"], capture_output=True, text=True)
-                if res.returncode == 0:
-                    return c
-            except Exception:
-                continue
+            if os.path.exists(c):
+                return c
+
         return "git"
 
     def _run_git(self, args: list, cwd: Optional[Path] = None) -> subprocess.CompletedProcess:

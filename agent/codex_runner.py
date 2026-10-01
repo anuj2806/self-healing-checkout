@@ -38,19 +38,25 @@ class CodexRunner:
         self.claude_cmd = self._find_claude_cli()
 
     def _find_claude_cli(self) -> Optional[str]:
-        """Locates the claude CLI binary across system and npm paths."""
-        candidates = [
-            "claude",
-            "claude.cmd",
-            r"C:\Users\anujsingh\AppData\Roaming\npm\claude.cmd",
-            "/usr/local/bin/claude",
-        ]
-        for c in candidates:
-            path = shutil.which(c)
+        """Locates the claude CLI binary across system and npm paths portably."""
+        # 1. Check system PATH
+        for name in ["claude", "claude.cmd"]:
+            path = shutil.which(name)
             if path:
                 return path
-            if os.path.exists(c):
-                return c
+
+        # 2. Check Windows dynamic APPDATA npm directory
+        appdata = os.getenv("APPDATA")
+        if appdata:
+            npm_claude = Path(appdata) / "npm" / "claude.cmd"
+            if npm_claude.exists():
+                return str(npm_claude)
+
+        # 3. Check standard Linux/Docker binary paths
+        for linux_path in ["/usr/local/bin/claude", "/usr/bin/claude"]:
+            if os.path.exists(linux_path):
+                return linux_path
+
         return None
 
     def execute_healing_cycle(self, incident: IncidentPayload) -> Dict[str, Any]:
