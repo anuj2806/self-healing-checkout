@@ -30,8 +30,19 @@ logger = logging.getLogger("incident_handler")
 app = FastAPI(title="Agent Incident Webhook Handler")
 orchestrator = Orchestrator()
 
-# In-memory tracking of active/handled incident signatures to prevent duplicate runs
+# In-memory tracking of active incident signatures to prevent duplicate concurrent runs
 ACTIVE_INCIDENTS: Dict[str, str] = {}
+
+
+def _run_healing_pipeline(incident: IncidentPayload, sig: str):
+    """Executes orchestrator healing loop and guarantees signature lock is released."""
+    try:
+        orchestrator.handle_incident(incident)
+    except Exception as e:
+        logger.exception(f"Unexpected error in orchestrator: {e}")
+    finally:
+        logger.info(f"Releasing active lock for signature: {sig}")
+        ACTIVE_INCIDENTS.pop(sig, None)
 
 
 @app.post("/webhook/incident")
@@ -49,8 +60,8 @@ async def receive_incident_webhook(incident: IncidentPayload, background_tasks: 
 
     ACTIVE_INCIDENTS[sig] = "INVESTIGATING"
 
-    # Run orchestrator healing pipeline in background
-    background_tasks.add_task(orchestrator.handle_incident, incident)
+    # Run orchestrator healing pipeline in background and ensure lock cleanup
+    background_tasks.add_task(_run_healing_pipeline, incident, sig)
 
     return {
         "status": "ACCEPTED",
@@ -91,6 +102,5 @@ if __name__ == "__main__":
     if args.incident_id:
         process_single_incident_by_id(args.backend_url, args.incident_id)
     else:
-        # Default to listening
         logger.info(f"Starting Incident Handler Webhook listener on port {args.port}...")
         uvicorn.run(app, host="0.0.0.0", port=args.port)

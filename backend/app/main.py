@@ -47,6 +47,19 @@ def health_check():
     )
 
 
+class VersionUpdate(BaseModel):
+    version: str
+
+
+@app.post("/api/version")
+def update_version(update: VersionUpdate):
+    """Allows promotion to new deployment version after CI/CD smoke test passes."""
+    global APP_VERSION
+    APP_VERSION = update.version
+    os.environ["APP_VERSION"] = update.version
+    return {"status": "promoted", "version": APP_VERSION}
+
+
 @app.post("/api/checkout", response_model=CheckoutResponse)
 def checkout_endpoint(request: CheckoutRequest):
     """

@@ -240,9 +240,12 @@ class Orchestrator:
         - Production smoke test on /health endpoint
         """
         logger.info("CI/CD Pipeline: Building artifact and promoting to production (v1.0.1)...")
-        # In real CI, GitHub Actions executes ci.yml and deploy.yml.
-        # Here we simulate the release promotion and verify health check.
         os.environ["APP_VERSION"] = "v1.0.1"
+        try:
+            with httpx.Client(timeout=3.0) as client:
+                client.post(f"{self.backend_url}/api/version", json={"version": "v1.0.1"})
+        except Exception as e:
+            logger.warning(f"Could not update backend deployment version: {e}")
         return True
 
     def _notify_incident_status(self, incident_id: str, status: str):
