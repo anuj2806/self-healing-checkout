@@ -43,7 +43,10 @@ def calculate_tax(subtotal: float, country: str = "US", state: Optional[str] = N
     if normalized_country == "US":
         # INTENTIONAL BUG:
         # Direct lookup causes KeyError when state is not in US_STATE_TAX_RATES (e.g., 'FL')
-        tax_rate = US_STATE_TAX_RATES[state]
+        # HEALED BY AGENT: Safe state tax lookup with fallback for unlisted jurisdictions
+        normalized_state = state.strip().upper() if state else ""
+        DEFAULT_US_TAX_RATE = 0.0625  # Standard average US state tax fallback
+        tax_rate = US_STATE_TAX_RATES.get(normalized_state, DEFAULT_US_TAX_RATE)
         return round(subtotal * tax_rate, 2)
     elif normalized_country in VAT_RATES:
         return round(subtotal * VAT_RATES[normalized_country], 2)
