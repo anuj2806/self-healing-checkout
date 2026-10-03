@@ -9,6 +9,52 @@ from app.tax import calculate_tax
 client = TestClient(app)
 
 
+def test_regression_inc_18f58562_florida_checkout(monkeypatch):
+    """The incident payload uses the US fallback without multiplying by None."""
+    emit_incident = Mock(return_value=SimpleNamespace(
+        incident_id="inc-18f58562",
+        error_type="TypeError",
+        error_message="unsupported operand type(s) for *: 'float' and 'NoneType'",
+    ))
+    monkeypatch.setattr("app.checkout.emit_incident", emit_incident)
+    payload = {
+        "cart_items": [
+            {"id": "item-101", "name": "Cyberpunk Mechanical Keyboard", "price": 120.0, "quantity": 1},
+            {"id": "item-102", "name": "Precision Wireless Mouse", "price": 45.0, "quantity": 1},
+        ],
+        "shipping_address": {
+            "street": "742 Evergreen Terrace",
+            "city": "San Francisco",
+            "state": "FL",
+            "postal_code": "94103",
+            "country": "US",
+        },
+        "payment_details": {
+            "card_number_masked": "\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 4242",
+            "exp_month": 10,
+            "exp_year": 2028,
+        },
+        "coupon_code": None,
+    }
+    response = client.post("/api/checkout", json=payload)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["status"] == "COMPLETED"
+    assert data["subtotal"] == 165.0
+    assert data["tax"] == 10.31
+    assert data["total"] == 175.31
+    emit_incident.assert_not_called()
+
+
+@pytest.mark.parametrize("country", [None, ""])
+def test_tax_with_missing_country_and_state(country):
+    assert calculate_tax(100.0, country=country) == 6.25
+
+
+def test_tax_with_default_jurisdiction():
+    assert calculate_tax(100.0) == 6.25
+
+
 def test_regression_inc_daa77a88_california_checkout(monkeypatch):
     """The exact incident payload must complete without an undefined tax_rate."""
     emit_incident = Mock(return_value=SimpleNamespace(
