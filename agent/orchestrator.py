@@ -172,19 +172,24 @@ class Orchestrator:
             commit_msg = f"fix(checkout): resolve incident {incident_id} - {incident.error_type}\n\nAutomated fix with regression test verified by deterministic gate."
             self._run_git(["commit", "-m", commit_msg], cwd=worktree_path)
 
-            # Merge / Promote verified fix into main branch
-            logger.info("Merging and promoting verified fix into main branch...")
-            for rel_file in gate_details.get("modified_files", []):
-                src = worktree_path / rel_file
-                dst = self.repo_root / rel_file
-                if src.exists():
-                    dst.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dst)
-                    logger.info(f"Promoted verified file to main tree: {rel_file}")
-
+            # Merge verified fix branch into main using --no-ff to preserve branch history and visual merge graph
+            logger.info(f"Merging verified branch {branch_name} into main (creating merge graph)...")
             self._run_git(["checkout", "main"])
-            self._run_git(["add", "backend/app", "backend/tests"])
-            self._run_git(["commit", "-m", f"fix(checkout): resolve incident {incident_id} - {incident.error_type}\n\nVerified by deterministic test gate."])
+            merge_msg = f"Merge branch '{branch_name}' (Incident {incident_id})"
+            merge_res = self._run_git(["merge", "--no-ff", branch_name, "-m", merge_msg])
+
+            if merge_res.returncode != 0:
+                logger.warning(f"git merge --no-ff encountered conflict: {merge_res.stderr}. Promoting files directly...")
+                for rel_file in gate_details.get("modified_files", []):
+                    src = worktree_path / rel_file
+                    dst = self.repo_root / rel_file
+                    if src.exists():
+                        dst.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dst)
+                self._run_git(["add", "backend/app", "backend/tests"])
+                self._run_git(["commit", "-m", merge_msg])
+            else:
+                logger.info(f"Successfully merged {branch_name} into main with merge commit.")
 
             # Trigger CI/CD deployment smoke check
             deploy_success = self._simulate_ci_cd_deployment(incident)
