@@ -102,6 +102,7 @@ class CodexRunner:
         logger.info(f"Fault located in: {fault_info['target_file']} around line {fault_info['line_number']}")
 
         cli_succeeded = False
+        cli_error_msg = ""
         agent_type = "unknown"
 
         # 1. If OpenAI key is set: Run Codex CLI
@@ -112,8 +113,9 @@ class CodexRunner:
                 logger.error(err_msg)
                 return {"success": False, "error": err_msg, "incident_id": incident.incident_id}
 
+            self._ensure_codex_authenticated()
             logger.info("OPENAI_API_KEY detected. Dispatched to Codex CLI...")
-            cli_succeeded = self._run_with_codex_cli(incident, fault_info)
+            cli_succeeded, cli_error_msg = self._run_with_codex_cli(incident, fault_info)
 
         # 2. If Anthropic key is set: Run Claude Code CLI
         elif self.anthropic_key:
@@ -124,13 +126,13 @@ class CodexRunner:
                 return {"success": False, "error": err_msg, "incident_id": incident.incident_id}
 
             logger.info("ANTHROPIC_API_KEY detected. Dispatched to Claude Code CLI...")
-            cli_succeeded = self._run_with_claude_code(incident, fault_info)
+            cli_succeeded, cli_error_msg = self._run_with_claude_code(incident, fault_info)
 
         if not cli_succeeded:
-            logger.error(f"{agent_type} was unable to synthesize and apply a fix.")
+            logger.error(f"{agent_type} was unable to synthesize and apply a fix: {cli_error_msg[:300]}")
             return {
                 "success": False,
-                "error": f"{agent_type} execution failed.",
+                "error": f"{agent_type} execution failed: {cli_error_msg}",
                 "incident_id": incident.incident_id,
                 "agent_type": agent_type,
             }
@@ -148,7 +150,35 @@ class CodexRunner:
             "agent_type": agent_type,
         }
 
-    def _run_with_codex_cli(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> bool:
+    def _ensure_codex_authenticated(self):
+        """Authenticates Codex CLI with OPENAI_API_KEY if not already logged in."""
+        if not self.openai_key or not self.codex_cmd:
+            return
+        try:
+            status_res = subprocess.run(
+                [self.codex_cmd, "login", "status"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                stdin=subprocess.DEVNULL,
+            )
+            if status_res.returncode != 0 or "Logged in" not in (status_res.stdout + status_res.stderr):
+                logger.info("Authenticating Codex CLI with OPENAI_API_KEY...")
+                login_res = subprocess.run(
+                    [self.codex_cmd, "login", "--with-api-key"],
+                    input=self.openai_key.strip(),
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+                if login_res.returncode == 0:
+                    logger.info("Codex CLI successfully authenticated with API key.")
+                else:
+                    logger.warning(f"Codex CLI login returned code {login_res.returncode}: {login_res.stderr}")
+        except Exception as e:
+            logger.warning(f"Could not verify or perform Codex CLI login: {e}")
+
+    def _run_with_codex_cli(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> Tuple[bool, str]:
         """Invokes Codex CLI non-interactively inside the isolated worktree."""
         prompt = (
             f"Fix production incident {incident.incident_id}:\n"
@@ -163,26 +193,29 @@ class CodexRunner:
         )
 
         try:
-            logger.info(f"Executing: {self.codex_cmd} exec ...")
-            cmd = [self.codex_cmd, "exec", prompt, "--dangerously-bypass-approvals-and-sandbox"]
+            logger.info(f"Executing: {self.codex_cmd} exec --dangerously-bypass-approvals-and-sandbox ...")
+            cmd = [self.codex_cmd, "exec", "--dangerously-bypass-approvals-and-sandbox", prompt]
             res = subprocess.run(
                 cmd,
                 cwd=str(self.worktree_dir),
                 capture_output=True,
                 text=True,
                 timeout=180,
+                stdin=subprocess.DEVNULL,
                 env=os.environ.copy(),
             )
             logger.info(f"Codex CLI completed with return code {res.returncode}")
             if res.returncode == 0:
-                return True
+                return True, ""
             else:
-                logger.warning(f"Codex CLI stderr: {res.stderr[:300]}")
+                err_text = (res.stderr or res.stdout or "").strip()
+                logger.error(f"Codex CLI execution failed (exit {res.returncode}):\n{err_text}")
+                return False, err_text
         except Exception as e:
             logger.error(f"Codex CLI process execution error: {e}")
-        return False
+            return False, str(e)
 
-    def _run_with_claude_code(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> bool:
+    def _run_with_claude_code(self, incident: IncidentPayload, fault_info: Dict[str, Any]) -> Tuple[bool, str]:
         """Invokes Claude Code CLI inside the isolated worktree in headless mode."""
         prompt = (
             f"Fix production incident {incident.incident_id}:\n"
@@ -205,16 +238,19 @@ class CodexRunner:
                 capture_output=True,
                 text=True,
                 timeout=180,
+                stdin=subprocess.DEVNULL,
                 env=os.environ.copy(),
             )
             logger.info(f"Claude Code CLI completed with return code {res.returncode}")
             if res.returncode == 0:
-                return True
+                return True, ""
             else:
-                logger.warning(f"Claude Code stderr: {res.stderr[:300]}")
+                err_text = (res.stderr or res.stdout or "").strip()
+                logger.error(f"Claude Code CLI execution failed (exit {res.returncode}):\n{err_text}")
+                return False, err_text
         except Exception as e:
             logger.error(f"Claude Code CLI process execution error: {e}")
-        return False
+            return False, str(e)
 
     def _analyze_incident(self, incident: IncidentPayload) -> Dict[str, Any]:
         """Parses the stack trace and request payload to identify failing file and parameters."""

@@ -139,6 +139,17 @@ class Orchestrator:
 
             logger.info(f"Agent finished investigation. Reported success: {agent_result.get('success')}")
 
+            if not agent_result.get("success"):
+                err = agent_result.get("error", "Agent failed to synthesize fix")
+                logger.error(f"Agent failed to repair incident {incident_id}: {err}")
+                self._notify_incident_status(incident_id, "FAILED")
+                return {
+                    "success": False,
+                    "reason": "Agent repair failure",
+                    "error": err,
+                    "details": agent_result,
+                }
+
             # DETERMINISTIC VERIFICATION GATE
             # The agent is NEVER trusted to declare safety. The orchestrator independently verifies!
             logger.info("Executing Deterministic Verification Gates...")
