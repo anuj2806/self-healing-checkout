@@ -1,7 +1,58 @@
 from fastapi.testclient import TestClient
+import pytest
+from types import SimpleNamespace
+from unittest.mock import Mock
+
 from app.main import app
+from app.tax import calculate_tax
 
 client = TestClient(app)
+
+
+def test_regression_inc_daa77a88_california_checkout(monkeypatch):
+    """The exact incident payload must complete without an undefined tax_rate."""
+    emit_incident = Mock(return_value=SimpleNamespace(
+        incident_id="inc-daa77a88",
+        error_type="NameError",
+        error_message="name 'tax_rate' is not defined",
+    ))
+    monkeypatch.setattr("app.checkout.emit_incident", emit_incident)
+    payload = {
+        "cart_items": [
+            {"id": "item-101", "name": "Cyberpunk Mechanical Keyboard", "price": 120.0, "quantity": 1},
+            {"id": "item-102", "name": "Precision Wireless Mouse", "price": 45.0, "quantity": 1},
+        ],
+        "shipping_address": {
+            "street": "742 Evergreen Terrace",
+            "city": "San Francisco",
+            "state": "CA",
+            "postal_code": "94103",
+            "country": "US",
+        },
+        "payment_details": {
+            "card_number_masked": "\u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 \u2022\u2022\u2022\u2022 4242",
+            "exp_month": 10,
+            "exp_year": 2028,
+        },
+        "coupon_code": None,
+    }
+    response = client.post("/api/checkout", json=payload)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["status"] == "COMPLETED"
+    assert data["subtotal"] == 165.0
+    assert data["tax"] == 13.61
+    assert data["total"] == 178.61
+    emit_incident.assert_not_called()
+
+
+@pytest.mark.parametrize("state", ["FL", "ZZ", None, "", "   "])
+def test_us_tax_fallback_for_unlisted_or_missing_state(state):
+    assert calculate_tax(100.0, country="US", state=state) == 6.25
+
+
+def test_us_tax_normalizes_jurisdiction():
+    assert calculate_tax(100.0, country=" us ", state=" ca ") == 8.25
 
 
 def test_health_check():

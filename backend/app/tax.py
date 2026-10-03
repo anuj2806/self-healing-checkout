@@ -1,9 +1,4 @@
-"""
-Tax Calculation Module for Checkout.
-
-WARNING: Contains an intentional production bug where calculating tax for US states
-not explicitly defined in US_STATE_TAX_RATES causes an unhandled KeyError!
-"""
+"""Tax calculation for checkout with fallback rates for unlisted jurisdictions."""
 
 from typing import Optional
 
@@ -24,6 +19,7 @@ VAT_RATES = {
 }
 
 DEFAULT_GLOBAL_TAX_RATE = 0.05
+DEFAULT_US_TAX_RATE = 0.0625
 
 
 def calculate_tax(subtotal: float, country: str = "US", state: Optional[str] = None) -> float:
@@ -37,10 +33,8 @@ def calculate_tax(subtotal: float, country: str = "US", state: Optional[str] = N
     normalized_country = (country or "US").strip().upper()
 
     if normalized_country == "US":
-        # HEALED BY AGENT: Safe state tax lookup with fallback for unlisted jurisdictions
         normalized_state = state.strip().upper() if state else ""
-        DEFAULT_US_TAX_RATE = 0.0625  # Standard average US state tax fallback
-        US_STATE_TAX_RATES.get(normalized_state, DEFAULT_US_TAX_RATE)
+        tax_rate = US_STATE_TAX_RATES.get(normalized_state, DEFAULT_US_TAX_RATE)
         return round(subtotal * tax_rate, 2)
     elif normalized_country in VAT_RATES:
         return round(subtotal * VAT_RATES[normalized_country], 2)
