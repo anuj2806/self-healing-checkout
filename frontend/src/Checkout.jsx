@@ -9,9 +9,9 @@ export default function Checkout({ onOrderPlaced, onIncidentTriggered }) {
 
   const [shipping, setShipping] = useState({
     street: '742 Evergreen Terrace',
-    city: 'Orlando',
-    state: 'FL', // Defaults to Florida to easily test the incident!
-    postal_code: '32801',
+    city: 'San Francisco',
+    state: 'CA',
+    postal_code: '94103',
     country: 'US',
   });
 
@@ -21,16 +21,6 @@ export default function Checkout({ onOrderPlaced, onIncidentTriggered }) {
 
   const subtotal = cart.reduce((sum, i) => sum + i.price * i.quantity, 0);
 
-  const handlePresetChange = (state, city = 'San Francisco', zip = '94103') => {
-    setShipping((prev) => ({
-      ...prev,
-      state,
-      city,
-      postal_code: zip,
-    }));
-    setResult(null);
-    setErrorInfo(null);
-  };
 
   const handleCheckout = async (e) => {
     if (e) e.preventDefault();
@@ -91,53 +81,7 @@ export default function Checkout({ onOrderPlaced, onIncidentTriggered }) {
         </div>
       </div>
 
-      {/* Quick Scenario Buttons */}
-      <div style={{ marginBottom: '18px' }}>
-        <label style={{ fontSize: '0.78rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', display: 'block', marginBottom: '8px' }}>
-          Test Scenarios:
-        </label>
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
-          <button
-            type="button"
-            onClick={() => handlePresetChange('CA', 'San Francisco', '94103')}
-            style={{
-              padding: '10px',
-              borderRadius: '8px',
-              border: shipping.state === 'CA' ? '1px solid #10b981' : '1px solid #334155',
-              background: shipping.state === 'CA' ? '#064e3b' : '#1e293b',
-              color: shipping.state === 'CA' ? '#6ee7b7' : '#cbd5e1',
-              cursor: 'pointer',
-              fontSize: '0.8rem',
-              fontWeight: 600,
-              textAlign: 'left',
-              transition: 'all 0.2s',
-            }}
-          >
-            ✅ Normal Checkout<br/>
-            <span style={{ fontSize: '0.7rem', fontWeight: 400, opacity: 0.85 }}>State: CA (Known Rate 8.25%)</span>
-          </button>
 
-          <button
-            type="button"
-            onClick={() => handlePresetChange('FL', 'Orlando', '32801')}
-            style={{
-              padding: '10px',
-              borderRadius: '8px',
-              border: shipping.state === 'FL' ? '1px solid #ef4444' : '1px solid #334155',
-              background: shipping.state === 'FL' ? '#450a0a' : '#1e293b',
-              color: shipping.state === 'FL' ? '#fca5a5' : '#cbd5e1',
-              cursor: 'pointer',
-              fontSize: '0.8rem',
-              fontWeight: 600,
-              textAlign: 'left',
-              transition: 'all 0.2s',
-            }}
-          >
-            ❌ Trigger 500 Bug<br/>
-            <span style={{ fontSize: '0.7rem', fontWeight: 400, opacity: 0.85 }}>State: FL (KeyError Crash)</span>
-          </button>
-        </div>
-      </div>
 
       {/* Shipping Address Inputs */}
       <form onSubmit={handleCheckout}>

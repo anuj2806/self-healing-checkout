@@ -173,7 +173,7 @@ export default function App() {
 
             {incidents.length === 0 ? (
               <div style={{ textAlign: 'center', padding: '24px', color: '#64748b', fontSize: '0.85rem' }}>
-                No incidents detected yet. Click "Trigger 500 Bug" on the left to fire an incident!
+                No incidents detected yet. Submit an order or test unexpected inputs to observe the autonomous repair loop!
               </div>
             ) : (
               <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
