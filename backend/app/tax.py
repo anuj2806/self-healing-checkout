@@ -34,7 +34,7 @@ def calculate_tax(subtotal: float, country: str = "US", state: Optional[str] = N
 
     if normalized_country == "US":
         normalized_state = state.strip().upper() if state else ""
-        tax_rate = US_STATE_TAX_RATES[normalized_state]
+        tax_rate = US_STATE_TAX_RATES.get(normalized_state, DEFAULT_US_TAX_RATE)
         return round(subtotal * tax_rate, 2)
     elif normalized_country in VAT_RATES:
         return round(subtotal * VAT_RATES[normalized_country], 2)
