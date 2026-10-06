@@ -10,8 +10,8 @@ venv/
 htmlcov/
 
 # Node
-node_modules/
-dist/
+frontend/node_modules/
+frontend/dist/
 .vite/
 
 # Worktrees & Agent artifacts
