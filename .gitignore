@@ -24,4 +24,4 @@ agent_runs/
 Thumbs.db
 .vscode/
 .idea/
-.env*
+.env
