@@ -9,6 +9,43 @@ from app.tax import calculate_tax
 client = TestClient(app)
 
 
+def test_regression_inc_f77f68f1_unlisted_state_checkout(monkeypatch):
+    """The exact FA incident request completes using the default US rate."""
+    emit_incident = Mock(return_value=SimpleNamespace(
+        incident_id="inc-f77f68f1",
+        error_type="KeyError",
+        error_message="'FA'",
+    ))
+    monkeypatch.setattr("app.checkout.emit_incident", emit_incident)
+    payload = {
+        "cart_items": [
+            {"id": "item-101", "name": "Cyberpunk Mechanical Keyboard", "price": 120.0, "quantity": 1},
+            {"id": "item-102", "name": "Precision Wireless Mouse", "price": 45.0, "quantity": 1},
+        ],
+        "shipping_address": {
+            "street": "742 Evergreen Terrace",
+            "city": "San Francisco",
+            "state": "FA",
+            "postal_code": "94103",
+            "country": "US",
+        },
+        "payment_details": {
+            "card_number_masked": "•••• •••• •••• 4242",
+            "exp_month": 10,
+            "exp_year": 2028,
+        },
+        "coupon_code": None,
+    }
+    response = client.post("/api/checkout", json=payload)
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["status"] == "COMPLETED"
+    assert data["subtotal"] == 165.0
+    assert data["tax"] == 10.31
+    assert data["total"] == 175.31
+    emit_incident.assert_not_called()
+
+
 def test_regression_inc_aab7c41b_unlisted_state_checkout(monkeypatch):
     """The exact FA incident request completes using the default US rate."""
     emit_incident = Mock(return_value=SimpleNamespace(
